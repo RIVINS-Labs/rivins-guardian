@@ -43,6 +43,16 @@ CREATE TABLE IF NOT EXISTS rate_tracking (
   ts INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_rate_user_kind ON rate_tracking(user_id, kind, ts);
+
+CREATE TABLE IF NOT EXISTS warns (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL,
+  moderator_id TEXT NOT NULL,
+  reason TEXT,
+  created_at INTEGER NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1   -- 0 = ingetrokken via /unwarn
+);
+CREATE INDEX IF NOT EXISTS idx_warns_user ON warns(user_id);
 `);
 
 function logEvent({ type, actorId = null, targetId = null, channelId = null, detail = null, severity = 'info' }) {
@@ -82,6 +92,25 @@ function setSetting(key, value) {
   `).run(key, String(value));
 }
 
+function addWarn(userId, moderatorId, reason) {
+  const info = db.prepare(`
+    INSERT INTO warns (user_id, moderator_id, reason, created_at) VALUES (?, ?, ?, ?)
+  `).run(userId, moderatorId, reason, Date.now());
+  return info.lastInsertRowid;
+}
+
+function getWarns(userId, activeOnly = true) {
+  const query = activeOnly
+    ? `SELECT * FROM warns WHERE user_id = ? AND active = 1 ORDER BY created_at DESC`
+    : `SELECT * FROM warns WHERE user_id = ? ORDER BY created_at DESC`;
+  return db.prepare(query).all(userId);
+}
+
+function deactivateWarn(warnId) {
+  const info = db.prepare(`UPDATE warns SET active = 0 WHERE id = ?`).run(warnId);
+  return info.changes > 0;
+}
+
 module.exports = {
   db,
   logEvent,
@@ -90,4 +119,7 @@ module.exports = {
   pruneRateTracking,
   getSetting,
   setSetting,
+  addWarn,
+  getWarns,
+  deactivateWarn,
 };

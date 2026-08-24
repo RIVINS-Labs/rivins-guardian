@@ -25,13 +25,27 @@ anomalieën natrekken) voortaan automatisch te laten gebeuren.
 
 ## Modules
 
-| Module | Bestand | Doet |
-|---|---|---|
-| Anti-spam | `src/modules/antiSpam.js` | Message-flooding, duplicate-berichten, mass-mentions, invite+@everyone-combinatie |
-| Anti-raid | `src/modules/antiRaid.js` | Join-spikes, nieuwe-account-detectie, **verdachte webhook-activiteit** (het DeathWish-scenario) |
-| Logging | `src/modules/logging.js` | Volledige audit-trail: deletes, edits, joins, bans, rolwijzigingen |
-| Admin-abuse-detectie | `src/modules/adminAbuseDetection.js` | Bewaakt de Discord Audit Log zelf op verdachte patronen door staff/admins |
-| Dashboard | `src/dashboard/` | Read-only webinterface, Discord-login, alleen toegestane user-ID's |
+| Module | Bestand | Doet | Grijpt zelf in? |
+|---|---|---|---|
+| Anti-spam | `src/modules/antiSpam.js` | Message-flooding, duplicate-berichten, mass-mentions, invite+@everyone-combinatie | Nee, alleen alarmeren |
+| Anti-raid | `src/modules/antiRaid.js` | Join-spikes, nieuwe-account-detectie, verdachte webhook-activiteit | Nee, alleen alarmeren |
+| **Anti-Bot Protection** | `src/modules/antiBot.js` | Elke bot die joint en niet op `ANTI_BOT_WHITELIST` staat | **Ja — automatisch gekickt** |
+| **Timeout Protection** | `src/modules/timeoutProtection.js` | Te veel timeouts door dezelfde persoon in korte tijd | **Ja — laatste timeout teruggedraaid + Moderate Members-rol afgepakt** |
+| **Warn-systeem** | `src/modules/warnSystem.js` | `/warn`, `/warns`, `/unwarn` slash-commands, persistent opgeslagen | Ja, op expliciet commando van staff |
+| **Voice-logs** | `src/modules/voiceLogs.js` | Join/leave/move tussen voice-kanalen, mute/deafen-wijzigingen | Nee, puur observerend |
+| Logging | `src/modules/logging.js` | Volledige audit-trail: deletes, edits, joins, bans, rolwijzigingen | Nee, puur observerend |
+| Admin-abuse-detectie | `src/modules/adminAbuseDetection.js` | Bewaakt de Discord Audit Log zelf op verdachte patronen door staff/admins | Alleen met `STRICT_MODE=true` (bewust terughoudend, want dit raakt je eigen staff) |
+| Dashboard | `src/dashboard/` | Read-only webinterface, Discord-login + IP-whitelist, alleen toegestane user-ID's | Nee |
+
+### Waarom Anti-Bot/Timeout Protection wél zelf ingrijpen, maar Admin-abuse-detectie niet
+
+Bewuste keuze: Anti-Bot Protection en Timeout Protection reageren op acties die
+zelden legitiem zijn in grote hoeveelheden (een onbekende bot die joint, tientallen
+timeouts in een minuut) — het risico van een foutieve automatische actie is laag.
+Admin-abuse-detectie kijkt naar acties die je EIGEN staff ook legitiem in bulk kan
+doen (bans, kicks, webhook-beheer) — daar is het risico van een vals alarm dat een
+collega's rechten afpakt groter, vandaar de `STRICT_MODE`-vlag die daar bewust uit
+staat totdat je 'm zelf aanzet.
 
 ## Lokaal testen
 

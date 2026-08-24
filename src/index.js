@@ -10,8 +10,12 @@ const { Client, GatewayIntentBits, Partials } = require('discord.js');
 const { pruneRateTracking } = require('./db');
 const antiSpam = require('./modules/antiSpam');
 const antiRaid = require('./modules/antiRaid');
+const antiBot = require('./modules/antiBot');
+const timeoutProtection = require('./modules/timeoutProtection');
 const { registerLogging, buildEmbed } = require('./modules/logging');
+const { registerVoiceLogs } = require('./modules/voiceLogs');
 const { startAdminAbuseWatcher } = require('./modules/adminAbuseDetection');
+const warnSystem = require('./modules/warnSystem');
 
 const {
   DISCORD_TOKEN,
@@ -19,7 +23,7 @@ const {
   OWNER_ID,
   LOG_CHANNEL_ID,
   ADMIN_ALERT_CHANNEL_ID,
-  STRICT_MODE, // 'true' om automatische quarantaine bij admin-abuse aan te zetten
+  STRICT_MODE, // 'true' om automatische quarantaine bij ADMIN-abuse aan te zetten (adminAbuseDetection.js)
 } = process.env;
 
 if (!DISCORD_TOKEN || !GUILD_ID || !LOG_CHANNEL_ID || !ADMIN_ALERT_CHANNEL_ID) {
@@ -35,25 +39,46 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildModeration, // bans
     GatewayIntentBits.GuildWebhooks,
+    GatewayIntentBits.GuildVoiceStates, // nodig voor voice-logs
   ],
   partials: [Partials.Message, Partials.Channel],
 });
 
 // Rollen die van anti-spam-checks worden uitgezonderd (bv. staff-rollen).
-// Vul aan met je eigen rol-ID's, bijvoorbeeld @Moderators, @Managers.
 const EXEMPT_ROLE_IDS = (process.env.EXEMPT_ROLE_IDS || '').split(',').filter(Boolean);
 
-client.once('ready', () => {
+client.once('ready', async () => {
   console.log(`RIVINS Guardian actief als ${client.user.tag}`);
+
   registerLogging(client, LOG_CHANNEL_ID);
+  registerVoiceLogs(client, LOG_CHANNEL_ID);
+
   startAdminAbuseWatcher(client, GUILD_ID, {
     ownerId: OWNER_ID,
     alertChannelId: ADMIN_ALERT_CHANNEL_ID,
     strictMode: STRICT_MODE === 'true',
   });
 
+  try {
+    await warnSystem.registerCommands(DISCORD_TOKEN, client.user.id, GUILD_ID);
+    console.log('Slash-commands (/warn, /warns, /unwarn) geregistreerd.');
+  } catch (err) {
+    console.error('Kon slash-commands niet registreren:', err.message);
+  }
+
   // Elk uur oude rate-tracking-data opruimen zodat de database niet blijft groeien
   setInterval(() => pruneRateTracking(), 60 * 60 * 1000);
+});
+
+client.on('interactionCreate', async (interaction) => {
+  try {
+    await warnSystem.handleInteraction(interaction);
+  } catch (err) {
+    console.error('Fout bij interactie-afhandeling:', err);
+    if (interaction.isRepliable() && !interaction.replied) {
+      await interaction.reply({ content: 'Er ging iets mis bij het uitvoeren van dit commando.', ephemeral: true }).catch(() => {});
+    }
+  }
 });
 
 client.on('messageCreate', async (message) => {
@@ -73,9 +98,6 @@ client.on('messageCreate', async (message) => {
         }).catch(() => {});
       }
       // Bewust GEEN automatische delete/ban hier — alleen alarmeren.
-      // Wil je dat berichten automatisch verwijderd worden, voeg dat hier
-      // bewust en zichtbaar toe, bijvoorbeeld:
-      // if (!msg.webhookId) await msg.delete().catch(() => {});
     },
   });
 
@@ -97,6 +119,7 @@ client.on('messageCreate', async (message) => {
 });
 
 client.on('guildMemberAdd', async (member) => {
+  // Anti-raid: join-snelheid + nieuwe-account-detectie
   await antiRaid.handleGuildMemberAdd(member, {
     onRaidDetected: async (guild, count) => {
       const alertChannel = client.channels.cache.get(ADMIN_ALERT_CHANNEL_ID);
@@ -110,6 +133,16 @@ client.on('guildMemberAdd', async (member) => {
         }).catch(() => {});
       }
     },
+  });
+
+  // Anti-bot: niet-gewhitelistte bots automatisch kicken
+  await antiBot.handleGuildMemberAdd(member, { alertChannelId: ADMIN_ALERT_CHANNEL_ID });
+});
+
+client.on('guildMemberUpdate', async (oldMember, newMember) => {
+  await timeoutProtection.handleGuildMemberUpdate(oldMember, newMember, {
+    ownerId: OWNER_ID,
+    alertChannelId: ADMIN_ALERT_CHANNEL_ID,
   });
 });
 
