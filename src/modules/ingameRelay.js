@@ -14,12 +14,14 @@
 //   event: text       -> a panel that STAYS on screen on every server
 //   flight event: txt -> the same, only on that server
 //   event: clear      -> panel gone (also "flight event: clear")
+//   center: text      -> big text in the middle of the screen, every server
+//   flight center: 20 text -> the same on one server, 20 seconds
 //
 // The reply is plain text, not JSON, on purpose: the game's script language parses
 // a line split in a handful of instructions, a JSON reader is a lot more code.
 //   last=<id>
 //   event=<id>\t<text>          (empty text = no panel)
-//   <id>\t<seconds>\t<text>
+//   <id>\t<seconds>\t<text>       (seconds prefixed with "c" = middle of the screen)
 //
 // Nothing here is secret: announcements are shown to every player anyway. The
 // only thing that must be protected is WHO can post, and that is enforced on the
@@ -191,6 +193,27 @@ function registerIngameRelay(client, { ownerId } = {}) {
           : `Event panel removed on ${where}.`,
         allowedMentions: { repliedUser: false },
       }).catch(() => {});
+      return;
+    }
+
+    // Big text in the middle of the screen: "center: text" or "<server> center: [sec] text".
+    const cm = raw.match(/^(?:([a-z][a-z0-9_-]{1,19})\s+)?(?:center|big):\s*([\s\S]+)$/i);
+    if (cm) {
+      const c = parse(cm[2]);
+      const ctarget = (cm[1] || 'all').toLowerCase();
+      if (!c.text) return;
+      const cit = { id: nextId(), at: Date.now(), target: ctarget, seconds: 'c' + c.seconds, text: c.text, seenBy: new Set() };
+      items.push(cit);
+      prune();
+      await message.react('📡').catch(() => {});
+      setTimeout(async () => {
+        const ok = cit.seenBy.size > 0;
+        await message.react(ok ? '✅' : '⚠️').catch(() => {});
+        await message.reply({
+          content: ok ? `Shown in the middle of the screen on: **${[...cit.seenBy].join(', ')}** (${c.seconds}s)` : 'Not shown in-game - no matching server checked in.',
+          allowedMentions: { repliedUser: false },
+        }).catch(() => {});
+      }, CHECK_AFTER_MS);
       return;
     }
 
