@@ -1,0 +1,225 @@
+// src/modules/ingameRelay.js
+// Discord -> Arma Reforger in-game announcements.
+//
+// Staff type in one Discord channel; every RIVINSlive Arma server shows the text
+// on screen within a few seconds. A Reforger server cannot receive a push, so it
+// polls: the "RIVINS Discord Relay" mod asks GET /relay/<server>?after=<id> every
+// few seconds and this module answers with whatever is new.
+//
+// Message format in the channel:
+//   text              -> every server, 15 seconds
+//   30 text           -> every server, 30 seconds
+//   flight: text      -> only the server whose relay key is "flight"
+//   flight: 30 text   -> both
+//   event: text       -> a panel that STAYS on screen on every server
+//   flight event: txt -> the same, only on that server
+//   event: clear      -> panel gone (also "flight event: clear")
+//
+// The reply is plain text, not JSON, on purpose: the game's script language parses
+// a line split in a handful of instructions, a JSON reader is a lot more code.
+//   last=<id>
+//   event=<id>\t<text>          (empty text = no panel)
+//   <id>\t<seconds>\t<text>
+//
+// Nothing here is secret: announcements are shown to every player anyway. The
+// only thing that must be protected is WHO can post, and that is enforced on the
+// Discord side (channel permissions + the role check below). RELAY_KEY is an
+// optional extra: if set, a server must send ?k=<key>.
+
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+
+const CHANNEL_ID = process.env.RELAY_CHANNEL_ID || '1548409512023691344';           // #ingame-announcements
+const ROLE_IDS = (process.env.RELAY_ROLE_IDS || '1479967956598390947')              // ARMA Moderators
+  .split(',').map((s) => s.trim()).filter(Boolean);
+const PORT = parseInt(process.env.RELAY_PORT || process.env.SERVER_PORT || '0', 10);
+const RELAY_KEY = process.env.RELAY_KEY || '';
+
+const KEEP_MS = 5 * 60 * 1000;      // a server that was offline longer than this does not replay old text
+const CHECK_AFTER_MS = 20 * 1000;   // when the bot reports back in Discord who showed it
+const MAX_TEXT = 300;
+
+// The event panel survives a bot restart: data/ is kept by entrypoint.sh.
+const EVENT_FILE = path.join(path.dirname(process.env.DB_PATH || './data/guardian.sqlite'), 'relay_events.json');
+let events = {};                    // target ("all" or a server key) -> { id, text }
+try { events = JSON.parse(fs.readFileSync(EVENT_FILE, 'utf8')); } catch (_) { events = {}; }
+
+function saveEvents() {
+  try { fs.writeFileSync(EVENT_FILE, JSON.stringify(events)); } catch (err) { console.error('[Relay] Could not save events:', err.message); }
+}
+
+// The panel a server should show: the newest of "all" and its own.
+function eventFor(key) {
+  const a = events.all;
+  const s = events[key];
+  if (a && s) return a.id > s.id ? a : s;
+  return a || s || { id: 0, text: '' };
+}
+
+const items = [];                   // { id, at, target, seconds, text, seenBy:Set }
+const lastPoll = new Map();         // server key -> timestamp
+// Start at "now", never at 0. A game server that just started asks after=0 and
+// only remembers the number it gets back; if that number were 0 it would keep
+// asking after=0, which by design shows nothing, and never see a message.
+let lastId = (Math.floor(Date.now() / 1000) - 1700000000) * 10;
+
+function nextId() {
+  // Time-based, so the numbers keep rising across a bot restart and a server
+  // that remembered "after=<old id>" still gets new messages.
+  // Tenths of a second since 2023-11-14, NOT Date.now(): the game's script int is
+  // 32-bit (max 2 147 483 647). Milliseconds since 1970 would overflow it; this
+  // stays below that limit until the year 2030.
+  lastId = Math.max(lastId + 1, (Math.floor(Date.now() / 1000) - 1700000000) * 10);
+  return lastId;
+}
+
+function clean(text) {
+  return text.replace(/[\t\r\n]+/g, ' ').replace(/\s{2,}/g, ' ').trim().slice(0, MAX_TEXT);
+}
+
+function parse(content) {
+  let text = content.trim();
+  let target = 'all';
+  let seconds = 15;
+
+  // "word: text" only counts as a server prefix when that word is a server that
+  // has actually checked in (or "all"). Otherwise "Note: restart at 20:00" would
+  // silently go nowhere, and "12:30 event" would target a server called "12".
+  const t = text.match(/^([a-z][a-z0-9_-]{1,19}):\s*([\s\S]+)$/i);
+  if (t && (t[1].toLowerCase() === 'all' || lastPoll.has(t[1].toLowerCase()))) {
+    target = t[1].toLowerCase();
+    text = t[2];
+  }
+
+  // A leading number is a duration only between 5 and 120, so "2 players online"
+  // stays a sentence.
+  const s = text.match(/^(\d{1,3})\s+([\s\S]+)$/);
+  if (s && parseInt(s[1], 10) >= 5 && parseInt(s[1], 10) <= 120) {
+    seconds = parseInt(s[1], 10);
+    text = s[2];
+  }
+
+  return { target, seconds, text: clean(text) };
+}
+
+function mayPost(message, ownerId) {
+  if (message.author.bot) return false;
+  if (ownerId && message.author.id === ownerId) return true;
+  const roles = message.member?.roles?.cache;
+  return !!roles && ROLE_IDS.some((id) => roles.has(id));
+}
+
+function prune() {
+  const cutoff = Date.now() - KEEP_MS;
+  while (items.length && items[0].at < cutoff) items.shift();
+}
+
+function startHttp() {
+  if (!PORT) {
+    console.error('[Relay] No RELAY_PORT/SERVER_PORT - in-game relay HTTP endpoint NOT started.');
+    return;
+  }
+
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://relay');
+    const send = (code, body) => {
+      res.writeHead(code, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(body);
+    };
+
+    if (req.method !== 'GET') return send(405, 'GET only');
+    if (RELAY_KEY && url.searchParams.get('k') !== RELAY_KEY) return send(403, 'forbidden');
+
+    if (url.pathname === '/relay-status') {
+      const now = Date.now();
+      const lines = [...lastPoll.entries()].map(([k, t]) => `${k}\t${Math.round((now - t) / 1000)}s ago`);
+      return send(200, lines.join('\n') || 'no server has polled yet');
+    }
+
+    const m = url.pathname.match(/^\/relay\/([a-z0-9_-]{2,20})$/i);
+    if (!m) return send(404, 'not found');
+
+    const key = m[1].toLowerCase();
+    const after = parseInt(url.searchParams.get('after') || '0', 10) || 0;
+    lastPoll.set(key, Date.now());
+    prune();
+
+    const ev = eventFor(key);
+    const out = [`last=${lastId}`, `event=${ev.id}\t${ev.text}`];
+    // after=0 is a server that just started: tell it where we are, show nothing old.
+    if (after > 0) {
+      for (const it of items) {
+        if (it.id <= after) continue;
+        if (it.target !== 'all' && it.target !== key) continue;
+        out.push(`${it.id}\t${it.seconds}\t${it.text}`);
+        it.seenBy.add(key);
+      }
+    }
+    return send(200, out.join('\n'));
+  });
+
+  server.on('error', (err) => console.error('[Relay] HTTP error:', err.message));
+  server.listen(PORT, '0.0.0.0', () => console.log(`[Relay] In-game relay listening on port ${PORT}, channel ${CHANNEL_ID}`));
+}
+
+function registerIngameRelay(client, { ownerId } = {}) {
+  startHttp();
+
+  client.on('messageCreate', async (message) => {
+    if (message.channelId !== CHANNEL_ID) return;
+    if (!mayPost(message, ownerId)) return;
+
+    const raw = (message.cleanContent || message.content || '').trim();
+
+    // Event panel: "event: text" or "<server> event: text".
+    const evm = raw.match(/^(?:([a-z][a-z0-9_-]{1,19})\s+)?event:\s*([\s\S]*)$/i);
+    if (evm) {
+      const target = (evm[1] || 'all').toLowerCase();
+      let text = clean(evm[2] || '');
+      if (/^(clear|off|none|remove)$/i.test(text)) text = '';
+      // A panel for everyone replaces every server-specific one.
+      if (target === 'all') events = {};
+      events[target] = { id: nextId(), text };
+      saveEvents();
+      await message.react(text ? '📌' : '🧹').catch(() => {});
+      const where = target === 'all' ? 'every server' : `**${target}**`;
+      const clearCmd = target === 'all' ? 'event: clear' : `${target} event: clear`;
+      await message.reply({
+        content: text
+          ? `Event panel on ${where}: "${text}" - stays until you type \`${clearCmd}\``
+          : `Event panel removed on ${where}.`,
+        allowedMentions: { repliedUser: false },
+      }).catch(() => {});
+      return;
+    }
+
+    const { target, seconds, text } = parse(raw);
+    if (!text) return;
+
+    const it = { id: nextId(), at: Date.now(), target, seconds, text, seenBy: new Set() };
+    items.push(it);
+    prune();
+    await message.react('📡').catch(() => {});
+
+    setTimeout(async () => {
+      const now = Date.now();
+      const online = [...lastPoll.entries()].filter(([, t]) => now - t < 30000).map(([k]) => k);
+      if (it.seenBy.size > 0) {
+        await message.react('✅').catch(() => {});
+        await message.reply({
+          content: `Shown in-game on: **${[...it.seenBy].join(', ')}** (${seconds}s)`,
+          allowedMentions: { repliedUser: false },
+        }).catch(() => {});
+      } else {
+        await message.react('⚠️').catch(() => {});
+        const hint = online.length
+          ? `Servers online right now: ${online.join(', ')}. "${target}" matched none of them.`
+          : 'No Arma server has checked in during the last 30 seconds - are the servers running the RIVINS Discord Relay mod?';
+        await message.reply({ content: `Not shown in-game. ${hint}`, allowedMentions: { repliedUser: false } }).catch(() => {});
+      }
+    }, CHECK_AFTER_MS);
+  });
+}
+
+module.exports = { registerIngameRelay, parse };

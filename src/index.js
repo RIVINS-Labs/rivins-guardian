@@ -16,6 +16,7 @@ const { registerLogging, buildEmbed } = require('./modules/logging');
 const { registerVoiceLogs } = require('./modules/voiceLogs');
 const { startAdminAbuseWatcher } = require('./modules/adminAbuseDetection');
 const warnSystem = require('./modules/warnSystem');
+const { registerIngameRelay } = require('./modules/ingameRelay');
 
 const {
   DISCORD_TOKEN,
@@ -52,6 +53,7 @@ client.once('ready', async () => {
 
   registerLogging(client, LOG_CHANNEL_ID);
   registerVoiceLogs(client, LOG_CHANNEL_ID);
+  registerIngameRelay(client, { ownerId: OWNER_ID }); // Discord #ingame-announcements -> Arma servers
 
   startAdminAbuseWatcher(client, GUILD_ID, {
     ownerId: OWNER_ID,
