@@ -69,7 +69,20 @@ const ARMA_LOG_STYLE = {
   jail: { color: 0xc0392b, title: 'Sent to jail' },
   release: { color: 0x2ecc71, title: 'Released from jail' },
   mission: { color: 0x3498db, title: 'Mission' },
+  command: { color: 0x9b59b6, title: 'Staff command' },
 };
+
+// Discord -> Arma staff commands (13 Sep 2026, RIVINS: "can we send a command from Discord to
+// release someone from jail?"). ARMA Moderators type in #arma-jail-log:
+//   unjail <name>          -> every server
+//   flight unjail <name>   -> only that server
+// The flight school mod polls GET /arma-cmd/<server>?k=<arma log key>&after=<id> every 5 s and
+// answers in the same channel (a "Released from jail" embed, or "not found").
+// Reply lines:  last=<id>   and   <id>\t<action>\t<moderator>\t<argument>
+const CMD_KEEP_MS = 10 * 60 * 1000;
+const CMD_REPLAY_MS = 2 * 60 * 1000;   // a server that just (re)started still gets commands this young
+const cmds = [];                      // { id, at, target, action, who, arg }
+const lastCmdPoll = new Map();        // server key -> timestamp
 
 // The event panel survives a bot restart: data/ is kept by entrypoint.sh.
 const EVENT_FILE = path.join(path.dirname(process.env.DB_PATH || './data/guardian.sqlite'), 'relay_events.json');
@@ -195,6 +208,24 @@ function startHttp(client) {
       return;
     }
 
+    const cmdm = url.pathname.match(/^\/arma-cmd\/([a-z0-9_-]{2,20})$/i);
+    if (cmdm) {
+      if (req.method !== 'GET') return send(405, 'GET only');
+      if (!ARMA_LOG_KEY || url.searchParams.get('k') !== ARMA_LOG_KEY) return send(403, 'forbidden');
+      const key = cmdm[1].toLowerCase();
+      const after = parseInt(url.searchParams.get('after') || '0', 10) || 0;
+      lastCmdPoll.set(key, Date.now());
+      const now = Date.now();
+      while (cmds.length && cmds[0].at < now - CMD_KEEP_MS) cmds.shift();
+      const out = [`last=${lastId}`];
+      for (const c of cmds) {
+        if (c.target !== 'all' && c.target !== key) continue;
+        if (after > 0 ? c.id <= after : c.at < now - CMD_REPLAY_MS) continue;
+        out.push(`${c.id}\t${c.action}\t${c.who}\t${c.arg}`);
+      }
+      return send(200, out.join('\n'));
+    }
+
     if (req.method !== 'GET') return send(405, 'GET only');
     if (RELAY_KEY && url.searchParams.get('k') !== RELAY_KEY) return send(403, 'forbidden');
 
@@ -232,6 +263,33 @@ function startHttp(client) {
 
 function registerIngameRelay(client, { ownerId } = {}) {
   startHttp(client);
+
+  // Staff commands in #arma-jail-log.
+  client.on('messageCreate', async (message) => {
+    if (message.channelId !== ARMA_LOG_CHANNEL_ID) return;
+    if (!mayPost(message, ownerId)) return;
+    const raw = (message.content || '').trim();
+    const um = raw.match(/^(?:([a-z][a-z0-9_-]{1,19})\s+)?(unjail|release)\s+(.{1,40})$/i);
+    if (!um) {
+      if (/^(help|commands|\?)$/i.test(raw)) {
+        await message.reply({ content: 'Commands: `unjail <player name>` (every server) or `flight unjail <player name>` (one server). Releases the player from jail and clears their strikes.', allowedMentions: { repliedUser: false } }).catch(() => {});
+      }
+      return;
+    }
+    const target = (um[1] || 'all').toLowerCase();
+    const arg = clean(um[3]);
+    const who = clean(message.member?.displayName || message.author.username).slice(0, 40);
+    cmds.push({ id: nextId(), at: Date.now(), target, action: 'unjail', who, arg });
+    const now = Date.now();
+    const online = [...lastCmdPoll.entries()].filter(([k, t]) => now - t < 30000 && (target === 'all' || k === target)).map(([k]) => k);
+    await message.react(online.length ? '📡' : '⚠️').catch(() => {});
+    await message.reply({
+      content: online.length
+        ? `Unjail **${arg}** sent to: ${online.join(', ')}. The server answers here within a few seconds.`
+        : `No Arma server${target === 'all' ? '' : ` called "${target}"`} has checked in during the last 30 seconds - the command waits 2 minutes for a server to come online.`,
+      allowedMentions: { repliedUser: false },
+    }).catch(() => {});
+  });
 
   client.on('messageCreate', async (message) => {
     if (message.channelId !== CHANNEL_ID) return;
