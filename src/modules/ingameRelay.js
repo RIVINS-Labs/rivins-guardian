@@ -31,6 +31,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const CHANNEL_ID = process.env.RELAY_CHANNEL_ID || '1548409512023691344';           // #ingame-announcements
 const ROLE_IDS = (process.env.RELAY_ROLE_IDS || '1479967956598390947')              // ARMA Moderators
@@ -41,6 +42,34 @@ const RELAY_KEY = process.env.RELAY_KEY || '';
 const KEEP_MS = 5 * 60 * 1000;      // a server that was offline longer than this does not replay old text
 const CHECK_AFTER_MS = 20 * 1000;   // when the bot reports back in Discord who showed it
 const MAX_TEXT = 300;
+
+// Arma -> Discord staff log (13 Sep 2026): kill reports, strikes, civilian kills, jail.
+// The RIVINS flight school mod POSTs "type<TAB>text" to /arma-log/<server>?k=<key>.
+// Unlike the relay this endpoint WRITES into Discord, so it needs a key. It lives in
+// data/arma_log_key.txt (created on first start, kept by entrypoint.sh, never in git)
+// unless ARMA_LOG_KEY is set; the Arma servers carry the same key as "logkey=" in
+// profile/RIVINS/discord_relay.txt.
+const ARMA_LOG_CHANNEL_ID = process.env.ARMA_LOG_CHANNEL_ID || '1548769072789852250'; // #arma-jail-log
+const ARMA_LOG_KEY_FILE = path.join(path.dirname(process.env.DB_PATH || './data/guardian.sqlite'), 'arma_log_key.txt');
+let ARMA_LOG_KEY = process.env.ARMA_LOG_KEY || '';
+if (!ARMA_LOG_KEY) {
+  try { ARMA_LOG_KEY = fs.readFileSync(ARMA_LOG_KEY_FILE, 'utf8').trim(); } catch (_) { ARMA_LOG_KEY = ''; }
+  if (!ARMA_LOG_KEY) {
+    ARMA_LOG_KEY = crypto.randomBytes(18).toString('hex');
+    try { fs.writeFileSync(ARMA_LOG_KEY_FILE, ARMA_LOG_KEY); } catch (err) { console.error('[Relay] Could not save arma log key:', err.message); }
+  }
+}
+const ARMA_LOG_PER_MIN = 30;
+const armaLogCount = new Map();     // server key -> { minute, count }
+const ARMA_LOG_STYLE = {
+  report: { color: 0xe67e22, title: 'Kill reported as unfair' },
+  fair: { color: 0x95a5a6, title: 'Kill confirmed fair' },
+  strike: { color: 0xf1c40f, title: 'Strike' },
+  civ: { color: 0xe74c3c, title: 'Civilian killed' },
+  jail: { color: 0xc0392b, title: 'Sent to jail' },
+  release: { color: 0x2ecc71, title: 'Released from jail' },
+  mission: { color: 0x3498db, title: 'Mission' },
+};
 
 // The event panel survives a bot restart: data/ is kept by entrypoint.sh.
 const EVENT_FILE = path.join(path.dirname(process.env.DB_PATH || './data/guardian.sqlite'), 'relay_events.json');
@@ -117,7 +146,29 @@ function prune() {
   while (items.length && items[0].at < cutoff) items.shift();
 }
 
-function startHttp() {
+async function postArmaLog(client, server, body) {
+  const tab = body.indexOf('\t');
+  const type = (tab > 0 ? body.slice(0, tab) : 'info').trim().toLowerCase().slice(0, 20);
+  const text = clean(tab > 0 ? body.slice(tab + 1) : body).slice(0, 1000);
+  if (!text) return false;
+
+  const now = Math.floor(Date.now() / 60000);
+  const c = armaLogCount.get(server) || { minute: now, count: 0 };
+  if (c.minute !== now) { c.minute = now; c.count = 0; }
+  if (++c.count > ARMA_LOG_PER_MIN) { armaLogCount.set(server, c); return false; }
+  armaLogCount.set(server, c);
+
+  const style = ARMA_LOG_STYLE[type] || { color: 0x7f8c8d, title: type };
+  const channel = await client.channels.fetch(ARMA_LOG_CHANNEL_ID).catch(() => null);
+  if (!channel) return false;
+  await channel.send({
+    embeds: [{ color: style.color, title: style.title, description: text, footer: { text: `Arma server: ${server}` }, timestamp: new Date().toISOString() }],
+    allowedMentions: { parse: [] },
+  });
+  return true;
+}
+
+function startHttp(client) {
   if (!PORT) {
     console.error('[Relay] No RELAY_PORT/SERVER_PORT - in-game relay HTTP endpoint NOT started.');
     return;
@@ -129,6 +180,20 @@ function startHttp() {
       res.writeHead(code, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(body);
     };
+
+    const lm = url.pathname.match(/^\/arma-log\/([a-z0-9_-]{2,20})$/i);
+    if (lm) {
+      if (req.method !== 'POST') return send(405, 'POST only');
+      if (!ARMA_LOG_KEY || url.searchParams.get('k') !== ARMA_LOG_KEY) return send(403, 'forbidden');
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; if (body.length > 4000) req.destroy(); });
+      req.on('end', () => {
+        postArmaLog(client, lm[1].toLowerCase(), body)
+          .then((ok) => send(ok ? 200 : 429, ok ? 'ok' : 'dropped'))
+          .catch((err) => { console.error('[Relay] arma-log failed:', err.message); send(500, 'error'); });
+      });
+      return;
+    }
 
     if (req.method !== 'GET') return send(405, 'GET only');
     if (RELAY_KEY && url.searchParams.get('k') !== RELAY_KEY) return send(403, 'forbidden');
@@ -166,7 +231,7 @@ function startHttp() {
 }
 
 function registerIngameRelay(client, { ownerId } = {}) {
-  startHttp();
+  startHttp(client);
 
   client.on('messageCreate', async (message) => {
     if (message.channelId !== CHANNEL_ID) return;
