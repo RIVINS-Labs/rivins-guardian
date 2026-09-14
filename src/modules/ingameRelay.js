@@ -70,7 +70,17 @@ const ARMA_LOG_STYLE = {
   release: { color: 0x2ecc71, title: 'Released from jail' },
   mission: { color: 0x3498db, title: 'Mission' },
   command: { color: 0x9b59b6, title: 'Staff command' },
+  halloween: { color: 0xff7518, title: '🎃 Scary Nights' },
 };
+
+// Halloween Scary Nights (14 Sep 2026): pumpkins, the cursed pumpkin, banished ghosts. Public news,
+// so it goes to its own channel, never to the staff jail log. The channel id comes from
+// HALLOWEEN_CHANNEL_ID or data/halloween_channel.txt; without one those lines are dropped.
+const HALLOWEEN_CHANNEL_FILE = path.join(path.dirname(process.env.DB_PATH || './data/guardian.sqlite'), 'halloween_channel.txt');
+function halloweenChannelId() {
+  if (process.env.HALLOWEEN_CHANNEL_ID) return process.env.HALLOWEEN_CHANNEL_ID;
+  try { return fs.readFileSync(HALLOWEEN_CHANNEL_FILE, 'utf8').trim(); } catch (_) { return ''; }
+}
 
 // Discord -> Arma staff commands (13 Sep 2026, RIVINS: "can we send a command from Discord to
 // release someone from jail?"). ARMA Moderators type in #arma-jail-log:
@@ -172,7 +182,9 @@ async function postArmaLog(client, server, body) {
   armaLogCount.set(server, c);
 
   const style = ARMA_LOG_STYLE[type] || { color: 0x7f8c8d, title: type };
-  const channel = await client.channels.fetch(ARMA_LOG_CHANNEL_ID).catch(() => null);
+  const channelId = type === 'halloween' ? halloweenChannelId() : ARMA_LOG_CHANNEL_ID;
+  if (!channelId) return true;   // no Halloween channel configured: accept and drop
+  const channel = await client.channels.fetch(channelId).catch(() => null);
   if (!channel) return false;
   await channel.send({
     embeds: [{ color: style.color, title: style.title, description: text, footer: { text: `Arma server: ${server}` }, timestamp: new Date().toISOString() }],
