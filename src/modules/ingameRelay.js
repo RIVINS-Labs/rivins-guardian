@@ -169,9 +169,53 @@ function prune() {
   while (items.length && items[0].at < cutoff) items.shift();
 }
 
+// Jailboard (18 Sep 2026, RIVINS: "i want a jailboard that shows how many times someone was in
+// jail"). The mod sends type "jailboard" with entries "count~name~injail" joined by "||", highest
+// first. Instead of a new embed every time, ONE message per server in #arma-jail-log is edited in
+// place (and pinned the first time). Its id survives a restart in data/jailboard_msgs.json.
+const JAILBOARD_FILE = path.join(path.dirname(process.env.DB_PATH || './data/guardian.sqlite'), 'jailboard_msgs.json');
+let jailboardMsgs = {};
+try { jailboardMsgs = JSON.parse(fs.readFileSync(JAILBOARD_FILE, 'utf8')); } catch (_) { jailboardMsgs = {}; }
+
+function jailboardEmbed(server, raw) {
+  const rows = raw.split('||').map((s) => s.split('~')).filter((v) => v.length >= 2 && v[1].trim());
+  const medal = ['🥇', '🥈', '🥉'];
+  const lines = rows.slice(0, 15).map((v, i) => {
+    const count = parseInt(v[0], 10) || 0;
+    const name = v[1].replace(/[`*_~|>]/g, '').trim().slice(0, 40);
+    const now = v[2] === '1' ? '  🔒 **in jail now**' : '';
+    const place = medal[i] || ('**' + (i + 1) + '.**');
+    return place + ' **' + name + '** — ' + count + '× jailed' + now;
+  });
+  return {
+    color: 0x2c2f33,
+    title: '🚔 JAILBOARD',
+    description: lines.length ? lines.join('\n') : '_Nobody has been jailed yet._',
+    footer: { text: 'Arma server: ' + server + ' · updates after every jailing' },
+    timestamp: new Date().toISOString(),
+  };
+}
+
+async function postJailboard(client, server, raw) {
+  const channel = await client.channels.fetch(ARMA_LOG_CHANNEL_ID).catch(() => null);
+  if (!channel) return false;
+  const embed = jailboardEmbed(server, raw);
+  const id = jailboardMsgs[server];
+  if (id) {
+    const old = await channel.messages.fetch(id).catch(() => null);
+    if (old) { await old.edit({ embeds: [embed] }); return true; }
+  }
+  const msg = await channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
+  await msg.pin().catch(() => {});
+  jailboardMsgs[server] = msg.id;
+  try { fs.writeFileSync(JAILBOARD_FILE, JSON.stringify(jailboardMsgs)); } catch (err) { console.error('[Relay] Could not save jailboard ids:', err.message); }
+  return true;
+}
+
 async function postArmaLog(client, server, body) {
   const tab = body.indexOf('\t');
   const type = (tab > 0 ? body.slice(0, tab) : 'info').trim().toLowerCase().slice(0, 20);
+  if (type === 'jailboard') return postJailboard(client, server, tab > 0 ? body.slice(tab + 1, tab + 3001) : '');
   const text = clean(tab > 0 ? body.slice(tab + 1) : body).slice(0, 1000);
   if (!text) return false;
 
