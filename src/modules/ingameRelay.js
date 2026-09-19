@@ -169,7 +169,7 @@ function trustedBot(message) {
   return TRUSTED_BOT_NAMES.includes(message.author.username);
 }
 
-// "announce: text" (60 s), "announce 90: text", "announce 5m: text", "flight announce: text",
+// "announce: text" (60 s, FLIGHT SERVER ONLY), "announce 90: text", "announce 5m: text", "all announce: text" (every server), "testing announce: text",
 // "announce: Title | text", "announce: clear". The duration sits BEFORE the colon, so a text like
 // "5 minutes until restart" is never mistaken for a duration.
 const ANN_RE = /^(?:([a-z][a-z0-9_-]{1,19})\s+)?(?:announce|ann)(?:\s+(\d{1,4})\s*(s|sec|secs|seconds|m|min|mins|minutes)?)?\s*:\s*([\s\S]+)$/i;
@@ -395,7 +395,7 @@ function registerIngameRelay(client, { ownerId } = {}) {
 
     // The big announcement banner (19 Sep 2026). Goes out as a "c<seconds>" item, like center:.
     if (annm) {
-      const atarget = (annm[1] || 'all').toLowerCase();
+      const atarget = (annm[1] || 'flight').toLowerCase();   // 19 Sep 2026, RIVINS: "only for the flight server"; "all announce:" = every server
       if (atarget !== 'all' && !lastPoll.has(atarget)) {
         await message.reply({ content: `No Arma server called "${atarget}" has checked in. Known: ${[...lastPoll.keys()].join(', ') || 'none'}.`, allowedMentions: { repliedUser: false } }).catch(() => {});
         return;
@@ -420,7 +420,7 @@ function registerIngameRelay(client, { ownerId } = {}) {
         await message.react(ok ? '✅' : '⚠️').catch(() => {});
         await message.reply({
           content: ok
-            ? (clearIt ? `Announcement removed on: **${[...ait.seenBy].join(', ')}**` : `Announcement on screen on: **${[...ait.seenBy].join(', ')}** for ${len}. Remove early: \`${atarget === 'all' ? '' : atarget + ' '}announce: clear\``)
+            ? (clearIt ? `Announcement removed on: **${[...ait.seenBy].join(', ')}**` : `Announcement on screen on: **${[...ait.seenBy].join(', ')}** for ${len}. Remove early: \`${atarget === 'flight' ? '' : atarget + ' '}announce: clear\``)
             : 'Not shown in-game - no matching server checked in.',
           allowedMentions: { repliedUser: false },
         }).catch(() => {});
