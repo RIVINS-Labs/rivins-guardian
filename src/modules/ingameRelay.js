@@ -157,6 +157,23 @@ function parse(content) {
   return { target, seconds, text: clean(text) };
 }
 
+// 19 Sep 2026, RIVINS: "a system that you [Claude] and me can use to send announcements". Claude posts
+// through its own Discord bot (the rivins-discord MCP, shown as "RIVINS CBH"). Bots are ignored
+// everywhere, EXCEPT that one bot for the "announce:" command. Its id can be pinned with
+// RELAY_TRUSTED_BOT_IDS (comma separated); without it the bot is recognised by its name.
+const TRUSTED_BOT_IDS = (process.env.RELAY_TRUSTED_BOT_IDS || '').split(',').map((s) => s.trim()).filter(Boolean);
+const TRUSTED_BOT_NAMES = ['RIVINS CBH'];
+function trustedBot(message) {
+  if (!message.author.bot) return false;
+  if (TRUSTED_BOT_IDS.length) return TRUSTED_BOT_IDS.includes(message.author.id);
+  return TRUSTED_BOT_NAMES.includes(message.author.username);
+}
+
+// "announce: text" (60 s), "announce 90: text", "announce 5m: text", "flight announce: text",
+// "announce: Title | text", "announce: clear". The duration sits BEFORE the colon, so a text like
+// "5 minutes until restart" is never mistaken for a duration.
+const ANN_RE = /^(?:([a-z][a-z0-9_-]{1,19})\s+)?(?:announce|ann)(?:\s+(\d{1,4})\s*(s|sec|secs|m|min|mins)?)?\s*:\s*([\s\S]+)$/i;
+
 function mayPost(message, ownerId) {
   if (message.author.bot) return false;
   if (ownerId && message.author.id === ownerId) return true;
@@ -349,9 +366,46 @@ function registerIngameRelay(client, { ownerId } = {}) {
 
   client.on('messageCreate', async (message) => {
     if (message.channelId !== CHANNEL_ID) return;
-    if (!mayPost(message, ownerId)) return;
+    const rawAll = (message.cleanContent || message.content || '').trim();
+    const annm = rawAll.match(ANN_RE);
+    if (!mayPost(message, ownerId) && !(annm && trustedBot(message))) return;
 
-    const raw = (message.cleanContent || message.content || '').trim();
+    const raw = rawAll;
+
+    // The big announcement banner (19 Sep 2026). Goes out as a "c<seconds>" item, like center:.
+    if (annm) {
+      const atarget = (annm[1] || 'all').toLowerCase();
+      if (atarget !== 'all' && !lastPoll.has(atarget)) {
+        await message.reply({ content: `No Arma server called "${atarget}" has checked in. Known: ${[...lastPoll.keys()].join(', ') || 'none'}.`, allowedMentions: { repliedUser: false } }).catch(() => {});
+        return;
+      }
+      let secs = 60;
+      if (annm[2]) {
+        secs = parseInt(annm[2], 10);
+        if (annm[3] && /^m/i.test(annm[3])) secs *= 60;
+      }
+      secs = Math.max(5, Math.min(3600, secs));
+      let atext = clean(annm[4] || '');
+      const clearIt = /^(clear|off|none|remove|stop)$/i.test(atext);
+      if (clearIt) { atext = 'clear'; secs = 5; }
+      if (!atext) return;
+      const ait = { id: nextId(), at: Date.now(), target: atarget, seconds: 'c' + secs, text: atext, seenBy: new Set() };
+      items.push(ait);
+      prune();
+      await message.react('📢').catch(() => {});
+      setTimeout(async () => {
+        const ok = ait.seenBy.size > 0;
+        const len = secs >= 120 ? `${Math.round(secs / 60)} min` : `${secs} s`;
+        await message.react(ok ? '✅' : '⚠️').catch(() => {});
+        await message.reply({
+          content: ok
+            ? (clearIt ? `Announcement removed on: **${[...ait.seenBy].join(', ')}**` : `Announcement on screen on: **${[...ait.seenBy].join(', ')}** for ${len}. Remove early: \`${atarget === 'all' ? '' : atarget + ' '}announce: clear\``)
+            : 'Not shown in-game - no matching server checked in.',
+          allowedMentions: { repliedUser: false },
+        }).catch(() => {});
+      }, CHECK_AFTER_MS);
+      return;
+    }
 
     // Event panel: "event: text" or "<server> event: text".
     const evm = raw.match(/^(?:([a-z][a-z0-9_-]{1,19})\s+)?event:\s*([\s\S]*)$/i);
