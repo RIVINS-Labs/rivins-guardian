@@ -172,7 +172,7 @@ function trustedBot(message) {
 // "announce: text" (60 s), "announce 90: text", "announce 5m: text", "flight announce: text",
 // "announce: Title | text", "announce: clear". The duration sits BEFORE the colon, so a text like
 // "5 minutes until restart" is never mistaken for a duration.
-const ANN_RE = /^(?:([a-z][a-z0-9_-]{1,19})\s+)?(?:announce|ann)(?:\s+(\d{1,4})\s*(s|sec|secs|m|min|mins)?)?\s*:\s*([\s\S]+)$/i;
+const ANN_RE = /^(?:([a-z][a-z0-9_-]{1,19})\s+)?(?:announce|ann)(?:\s+(\d{1,4})\s*(s|sec|secs|seconds|m|min|mins|minutes)?)?\s*:\s*([\s\S]+)$/i;
 
 function mayPost(message, ownerId) {
   if (message.author.bot) return false;
