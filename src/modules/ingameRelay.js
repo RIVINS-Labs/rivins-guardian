@@ -71,7 +71,17 @@ const ARMA_LOG_STYLE = {
   mission: { color: 0x3498db, title: 'Mission' },
   command: { color: 0x9b59b6, title: 'Staff command' },
   halloween: { color: 0xff7518, title: '🎃 Scary Nights' },
+  operation: { color: 0x1abc9c, title: '🎯 Operation' },
 };
+
+// Team operations (19 Sep 2026, RIVINS: "all mission progress visible on Discord and the website -
+// names, kills, progress, time, points"). Public, so its own channel: OPERATION_CHANNEL_ID or
+// data/operation_channel.txt. Without one they go to the staff log, so nothing is lost.
+const OPERATION_CHANNEL_FILE = path.join(path.dirname(process.env.DB_PATH || './data/guardian.sqlite'), 'operation_channel.txt');
+function operationChannelId() {
+  if (process.env.OPERATION_CHANNEL_ID) return process.env.OPERATION_CHANNEL_ID;
+  try { return fs.readFileSync(OPERATION_CHANNEL_FILE, 'utf8').trim(); } catch (_) { return ''; }
+}
 
 // Halloween Scary Nights (14 Sep 2026): pumpkins, the cursed pumpkin, banished ghosts. Public news,
 // so it goes to its own channel, never to the staff jail log. The channel id comes from
@@ -243,7 +253,9 @@ async function postArmaLog(client, server, body) {
   armaLogCount.set(server, c);
 
   const style = ARMA_LOG_STYLE[type] || { color: 0x7f8c8d, title: type };
-  const channelId = type === 'halloween' ? halloweenChannelId() : ARMA_LOG_CHANNEL_ID;
+  let channelId = ARMA_LOG_CHANNEL_ID;
+  if (type === 'halloween') channelId = halloweenChannelId();
+  if (type === 'operation') channelId = operationChannelId() || ARMA_LOG_CHANNEL_ID;
   if (!channelId) return true;   // no Halloween channel configured: accept and drop
   const channel = await client.channels.fetch(channelId).catch(() => null);
   if (!channel) return false;
