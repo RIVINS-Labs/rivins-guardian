@@ -342,10 +342,31 @@ function registerIngameRelay(client, { ownerId } = {}) {
     if (message.channelId !== ARMA_LOG_CHANNEL_ID) return;
     if (!mayPost(message, ownerId)) return;
     const raw = (message.content || '').trim();
+
+    // 19 Sep 2026: pilot callsigns (flight school, RIVINS_Roepnamen.c).
+    //   callsign <player> = <new callsign>   change it
+    //   callsign <player> = random            a new random one
+    //   callsign <player>                     just tell me
+    const csm = raw.match(/^(?:([a-z][a-z0-9_-]{1,19})\s+)?callsign\s+(.{1,40}?)\s*(?:=\s*(.{1,24}))?$/i);
+    if (csm) {
+      const ctarget = (csm[1] || 'all').toLowerCase();
+      const cname = clean(csm[2]).replace(/=/g, '');
+      const cnew = csm[3] ? clean(csm[3]).replace(/=/g, '') : '';
+      const cwho = clean(message.member?.displayName || message.author.username).slice(0, 40);
+      cmds.push({ id: nextId(), at: Date.now(), target: ctarget, action: 'callsign', who: cwho, arg: cnew ? `${cname}=${cnew}` : cname });
+      const cnow = Date.now();
+      const conline = [...lastCmdPoll.entries()].filter(([k, tt]) => cnow - tt < 30000 && (ctarget === 'all' || k === ctarget)).map(([k]) => k);
+      await message.react(conline.length ? '📡' : '⚠️').catch(() => {});
+      if (!conline.length) {
+        await message.reply({ content: 'No Arma server has checked in during the last 30 seconds - the command waits 2 minutes for a server to come online.', allowedMentions: { repliedUser: false } }).catch(() => {});
+      }
+      return;
+    }
+
     const um = raw.match(/^(?:([a-z][a-z0-9_-]{1,19})\s+)?(unjail|release)\s+(.{1,40})$/i);
     if (!um) {
       if (/^(help|commands|\?)$/i.test(raw)) {
-        await message.reply({ content: 'Commands: `unjail <player name>` (every server) or `flight unjail <player name>` (one server). Releases the player from jail and clears their strikes.', allowedMentions: { repliedUser: false } }).catch(() => {});
+        await message.reply({ content: 'Commands: `unjail <player name>` (every server) or `flight unjail <player name>` (one server) - releases the player and clears their strikes.\n`callsign <player>` - shows their pilot callsign. `callsign <player> = VIPER 12` - changes it (`= random` for a new random one).', allowedMentions: { repliedUser: false } }).catch(() => {});
       }
       return;
     }
